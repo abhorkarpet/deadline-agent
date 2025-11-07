@@ -15,7 +15,7 @@ from deadline_agent.calendar import CalendarEventRequest, CalendarService
 
 
 FEEDBACK_FILE = "deadline_agent_feedback.jsonl"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def get_config_from_ui() -> AgentConfig:
@@ -103,6 +103,9 @@ def store_feedback(item, reason: str):
 def main():
     st.title("Deadline Agent")
     st.caption("Authenticate, scan inbox for deadlines, review results, and create reminders")
+    
+    # Browser recommendation
+    st.info("💡 **Best experience:** Use Chrome browser on Desktop for optimal performance")
 
     # Optional Welcome / Onboarding
     if "suppress_welcome" not in st.session_state:
