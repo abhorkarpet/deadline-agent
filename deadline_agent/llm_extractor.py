@@ -20,14 +20,39 @@ class InsufficientFundsError(Exception):
 
 EXTRACTION_PROMPT = """You are an expert at extracting deadline information from emails.
 
-Analyze this email and extract deadlines related to:
-- Subscription renewals or cancellations
-- Free trial end dates
-- Refund/cancellation deadlines
-- Billing dates
-- Travel/hotel booking cancellation deadlines
+Analyze this email and extract ONLY actionable deadlines where the user must take action by a specific date to avoid charges, cancellations, or loss of benefits.
 
-IMPORTANT: IGNORE shopping offers, promotional deals, or discount expiration dates unless they are related to actual subscription/trial cancellations or travel bookings.
+EXTRACT deadlines related to:
+- Subscription renewals or cancellations (user must cancel by date X to avoid charge)
+- Free trial end dates (trial expires on date X, user will be charged if not cancelled)
+- Refund/cancellation deadlines (user can cancel/refund by date X)
+- Billing dates (payment will be processed on date X)
+- Travel/hotel booking cancellation deadlines (user can cancel booking for refund by date X)
+
+CRITICAL RULES - DO NOT EXTRACT:
+1. Promotional/marketing content:
+   - Loyalty program promotions ("Earn status by staying X nights")
+   - Marketing campaign deadlines
+   - Promotional offers or deals
+   - Discount expiration dates
+   - Limited-time sales or special offers
+
+2. Informational-only dates:
+   - Dates when changes become effective (but no action required)
+   - Dates when services start (but no cancellation deadline)
+   - Investment changes effective dates (informational only)
+   - Policy updates or notices (no deadline for action)
+
+3. Incorrect categorization:
+   - Do NOT mark as "travel" unless there's an actual hotel/flight booking with cancellation deadline
+   - Do NOT mark as "subscription" unless there's an actual subscription renewal or cancellation deadline
+   - Verify the category matches the actual content
+
+4. Shopping/retail offers:
+   - "Sale ends tomorrow"
+   - "50% off expires Jan 5"
+   - "Limited time offer"
+   - Any retail/promotional expiration dates
 
 Email subject: {subject}
 Email sender: {sender}
@@ -38,23 +63,23 @@ Email content:
 Return a JSON array of deadline objects. Each object should have:
 - "deadline_at": ISO 8601 date string (e.g., "2025-01-15T00:00:00")
 - "title": Brief description (e.g., "Netflix subscription renews")
-- "category": One of: "subscription" (renewals/cancellations), "trial" (free trial ends), "travel" (hotel/flight cancellations), "billing" (payment dates), "refund" (refund deadlines), "general" (other deadlines)
-- "confidence": 0.0-1.0 based on how explicit the deadline is (reduce confidence for shopping offers)
-- "summary": A brief 1-2 sentence summary of the relevant part of the email explaining the deadline (optional but recommended)
-
-DO NOT extract:
-- Limited-time shopping deals ("Sale ends tomorrow")
-- Promotional discount expirations ("50% off expires Jan 5")
-- Marketing campaign deadlines
-- Generic promotional dates
+- "category": One of: "subscription" (renewals/cancellations), "trial" (free trial ends), "travel" (hotel/flight cancellations), "billing" (payment dates), "refund" (refund deadlines), "general" (other actionable deadlines)
+- "confidence": 0.0-1.0 based on how explicit and actionable the deadline is (reduce confidence for promotional content, informational dates, or ambiguous deadlines)
+- "summary": A brief 1-2 sentence summary explaining what action is required by the deadline
 
 Examples of what to extract:
-- "Your subscription renews on January 15, 2025" → {{"deadline_at": "2025-01-15T00:00:00", "title": "Subscription renewal", "category": "subscription", "confidence": 0.9, "summary": "Subscription will automatically renew on January 15, 2025"}}
+- "Your subscription renews on January 15, 2025. Cancel before then to avoid charges." → {{"deadline_at": "2025-01-15T00:00:00", "title": "Subscription renewal", "category": "subscription", "confidence": 0.9, "summary": "Subscription will automatically renew on January 15, 2025. Cancel before this date to avoid charges."}}
 - Invoice showing "Next billing: Feb 1" → {{"deadline_at": "2025-02-01T00:00:00", "title": "Next billing date", "category": "billing", "confidence": 0.8, "summary": "Next payment will be processed on February 1, 2025"}}
 - "Cancel hotel by Jan 10 for full refund" → {{"deadline_at": "2025-01-10T00:00:00", "title": "Hotel cancellation deadline", "category": "travel", "confidence": 0.9, "summary": "Hotel booking can be cancelled for full refund until January 10, 2025"}}
-- "Free trial ends February 5" → {{"deadline_at": "2025-02-05T00:00:00", "title": "Free trial ends", "category": "trial", "confidence": 0.9, "summary": "Free trial period expires on February 5, 2025"}}
+- "Free trial ends February 5" → {{"deadline_at": "2025-02-05T00:00:00", "title": "Free trial ends", "category": "trial", "confidence": 0.9, "summary": "Free trial period expires on February 5, 2025. Cancel before then to avoid charges."}}
 
-If there are NO relevant deadlines (only shopping offers), return an empty array: []
+Examples of what NOT to extract:
+- "Earn Diamond status by staying 10 nights by Dec 15" → [] (promotional/loyalty program)
+- "Investment changes effective Jan 1" → [] (informational only, no action required)
+- "Sale ends tomorrow" → [] (shopping promotion)
+- "Hotel booking" email with no cancellation deadline mentioned → [] (no actionable deadline)
+
+If there are NO actionable deadlines (only promotional content, informational dates, or shopping offers), return an empty array: []
 
 Return ONLY valid JSON, no other text.
 """

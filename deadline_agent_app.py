@@ -15,6 +15,7 @@ from deadline_agent.calendar import CalendarEventRequest, CalendarService
 
 
 FEEDBACK_FILE = "deadline_agent_feedback.jsonl"
+VERSION = "1.0.0"
 
 
 def get_config_from_ui() -> AgentConfig:
@@ -56,7 +57,12 @@ def get_config_from_ui() -> AgentConfig:
     llm_api_key = ""
     llm_model = "gpt-4o-mini"
     if use_llm:
-        llm_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("DA_LLM_API_KEY", ""), help="Get from https://platform.openai.com/api-keys")
+        llm_api_key = st.sidebar.text_input(
+            "OpenAI API Key", 
+            type="password", 
+            value=os.getenv("DA_LLM_API_KEY", ""), 
+            help="Get your API key from https://platform.openai.com/api-keys. You'll need to create an account and add a payment method."
+        )
         llm_model = st.sidebar.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"], index=0, help="gpt-4o-mini is cheapest and sufficient")
     
     return AgentConfig(
@@ -104,6 +110,9 @@ def main():
     if "welcomed" not in st.session_state:
         st.session_state.welcomed = False
 
+    # Render sidebar first so it's always available
+    cfg = get_config_from_ui()
+
     def render_welcome():
         st.subheader("Welcome 👋")
         st.markdown(
@@ -121,22 +130,25 @@ def main():
             - No messages are sent to any external server from this app.
 
             How to use:
-            1) Choose Gmail OAuth (recommended) or IMAP in the sidebar
+            1) Enter your email and app password in the sidebar
             2) Click "Authenticate & Scan"
             3) Review detected items, uncheck incorrect ones, and submit feedback if we mis-detected
             4) Click "Create Reminders" and download the .ics file
             """
         )
-        st.checkbox("Don't show again", key="suppress_welcome")
-        if st.button("I understand, continue →"):
+        dont_show = st.checkbox("Don't show again", key="suppress_welcome_checkbox")
+        if st.button("I understand, continue →", key="welcome_continue"):
+            if dont_show:
+                st.session_state.suppress_welcome = True
             st.session_state.welcomed = True
+            st.rerun()
 
+    # Show welcome only if not suppressed and not yet welcomed
     if not st.session_state.suppress_welcome and not st.session_state.welcomed:
         with st.container(border=True):
             render_welcome()
-            st.stop()
-
-    cfg = get_config_from_ui()
+        # Don't stop - allow sidebar to remain visible
+        st.stop()
 
     if "deadlines" not in st.session_state:
         st.session_state.deadlines = []
@@ -183,7 +195,13 @@ def main():
                 status_text.empty()
             
             st.session_state.deadlines = deadlines
-            st.session_state.selected = set(range(len(deadlines)))
+            # By default, exclude "general" category items from reminders
+            selected_indices = set()
+            for idx, item in enumerate(deadlines):
+                category = getattr(item, 'category', 'general')
+                if category != 'general':
+                    selected_indices.add(idx)
+            st.session_state.selected = selected_indices
             st.session_state.scan_stats = stats
             
             if len(deadlines) == 0:
@@ -246,6 +264,10 @@ def main():
                 with st.expander("Technical details"):
                     st.exception(e)
     
+    # Initialize scan trigger state
+    if "trigger_scan" not in st.session_state:
+        st.session_state.trigger_scan = False
+    
     col1, col2 = st.columns(2)
     with col1:
         # Check if we're in confirmation mode
@@ -279,8 +301,8 @@ def main():
                         if dont_remind:
                             st.session_state.skip_scan_confirmation = True
                         st.session_state.show_llm_confirmation = False
-                        # Proceed directly with scan
-                        perform_scan(cfg)
+                        st.session_state.trigger_scan = True
+                        st.rerun()
                 with col_cancel:
                     if st.button("Cancel", key="cancel_scan"):
                         st.session_state.show_llm_confirmation = False
@@ -293,6 +315,11 @@ def main():
             else:
                 # Proceed directly with scan
                 perform_scan(cfg)
+    
+    # Trigger scan after confirmation dialog is dismissed
+    if st.session_state.trigger_scan:
+        st.session_state.trigger_scan = False
+        perform_scan(cfg)
     with col2:
         if st.button("Clear Results"):
             st.session_state.deadlines = []
@@ -328,10 +355,26 @@ def main():
             key=lambda c: (category_order.index(c) if c in category_order else 999, c)
         )
         
+        # Debug: Show category breakdown (can be removed later)
+        if cfg.debug:
+            st.caption(f"📊 Categories found: {sorted_categories} | Total deadlines: {len(deadlines)}")
+        
         def render_deadline_item(item, actual_idx):
             """Render a single deadline item"""
             item_category = getattr(item, 'category', 'general')
-            selected = st.checkbox("Include", value=(actual_idx in st.session_state.selected), key=f"sel_{actual_idx}")
+            is_selected = actual_idx in st.session_state.selected
+            # Make "Include" checkbox more prominent
+            col_include, col_info = st.columns([1, 4])
+            with col_include:
+                selected = st.checkbox(
+                    "Include", 
+                    value=is_selected, 
+                    key=f"sel_{actual_idx}",
+                    help="Check to include this deadline in calendar reminders"
+                )
+            with col_info:
+                if item_category == "general":
+                    st.caption("⚠️ General category - excluded by default")
             if selected:
                 st.session_state.selected.add(actual_idx)
             else:
@@ -386,31 +429,31 @@ def main():
                     store_feedback(item, reason or "")
                     st.success("Thanks for the feedback!")
         
-        # Create tabs for each category
-        if len(sorted_categories) > 1:
+        # Create tabs for each category - always use tabs when there are results
+        if sorted_categories:
+            # Create tab labels with category emoji and count
             tab_labels = [f"{category_colors.get(cat, '⚪')} {cat.title()} ({len(deadlines_by_category[cat])})" for cat in sorted_categories]
             tabs = st.tabs(tab_labels)
             
+            # Render content in each tab
             for tab, category in zip(tabs, sorted_categories):
                 with tab:
                     category_deadlines = deadlines_by_category[category]
                     if not category_deadlines:
                         st.info("No deadlines in this category")
-                        continue
-                    
-                    for actual_idx, item in category_deadlines:
-                        item_category = getattr(item, 'category', 'general')
-                        category_emoji = category_colors.get(item_category, "⚪")
-                        with st.expander(f"{item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
-                            render_deadline_item(item, actual_idx)
+                    else:
+                        for actual_idx, item in category_deadlines:
+                            item_category = getattr(item, 'category', 'general')
+                            category_emoji = category_colors.get(item_category, "⚪")
+                            with st.expander(f"{item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
+                                render_deadline_item(item, actual_idx)
         else:
-            # If only one category, don't use tabs
-            category = sorted_categories[0] if sorted_categories else "general"
-            for actual_idx, item in deadlines_by_category.get(category, []):
-                item_category = getattr(item, 'category', 'general')
-                category_emoji = category_colors.get(item_category, "⚪")
+            # Fallback: no categories found (shouldn't happen, but handle gracefully)
+            st.warning("No categories found in deadlines")
+            for idx, item in enumerate(deadlines):
+                category_emoji = "⚪"
                 with st.expander(f"{item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
-                    render_deadline_item(item, actual_idx)
+                    render_deadline_item(item, idx)
 
         st.divider()
         st.subheader("Create calendar reminders for selected")
@@ -470,6 +513,10 @@ def main():
         else:
             st.write("No feedback collected yet")
             st.caption("Submit feedback on incorrect deadlines to help improve accuracy")
+
+    # Version footer
+    st.sidebar.divider()
+    st.sidebar.caption(f"Deadline Agent v{VERSION}")
 
 
 if __name__ == "__main__":
