@@ -22,6 +22,10 @@ def get_config_from_ui() -> AgentConfig:
     st.sidebar.markdown("### Email Configuration")
     with st.sidebar.expander("💡 How to get an app password", expanded=False):
         st.markdown("""
+        **⚠️ IMPORTANT: This is NOT your regular Gmail password!**
+        
+        You must generate a special "app password" - a 16-character code that allows apps to access your email securely.
+        
         **Gmail:**
         1. Go to [Google Account](https://myaccount.google.com/)
         2. Click **Security** (left sidebar)
@@ -29,7 +33,7 @@ def get_config_from_ui() -> AgentConfig:
         4. Scroll down to find **App passwords** (or search for it)
         5. Click **App passwords** > Select app: **Mail** > Select device: **Other (Custom name)**
         6. Enter a name (e.g., "Deadline Agent") and click **Generate**
-        7. Copy the 16-character password (shown only once)
+        7. Copy the 16-character password (shown only once) - this is your app password
         
         **Note:** If you don't see "App passwords", you may need to enable 2-Step Verification first.
         
@@ -42,7 +46,12 @@ def get_config_from_ui() -> AgentConfig:
         **Other providers:** Check your email provider's help docs for app password setup.
         """)
     email_address = st.sidebar.text_input("Email address", value=os.getenv("DA_EMAIL_ADDRESS", ""))
-    email_password = st.sidebar.text_input("Email app password", type="password", value=os.getenv("DA_EMAIL_PASSWORD", ""))
+    email_password = st.sidebar.text_input(
+        "Email app password", 
+        type="password", 
+        value=os.getenv("DA_EMAIL_PASSWORD", ""), 
+        help="⚠️ This is NOT your regular Gmail password. You must generate an app password (see instructions above)."
+    )
     imap_host = st.sidebar.text_input("IMAP host", value=os.getenv("DA_IMAP_HOST", "imap.gmail.com"))
     imap_port = st.sidebar.number_input("IMAP port", value=int(os.getenv("DA_IMAP_PORT", "993")))
     mailbox = st.sidebar.text_input("Mailbox", value=os.getenv("DA_MAILBOX", "INBOX"))
