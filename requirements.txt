@@ -1,0 +1,9 @@
+streamlit>=1.28.0
+beautifulsoup4>=4.12.2
+dateparser>=1.2.0
+rich>=13.7.0
+google-api-python-client>=2.127.0
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.0
+openai>=1.0.0
+
