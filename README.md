@@ -39,7 +39,9 @@ Set environment variables:
 - `DA_IMAP_HOST`: IMAP server (default: `imap.gmail.com`)
 - `DA_IMAP_PORT`: IMAP port (default: `993`)
 - `DA_MAILBOX`: Mailbox to scan (default: `INBOX`)
-- `DA_SINCE_DAYS`: How many days back to scan (default: `60`)
+- `DA_SCAN_WINDOW_MODE`: Scan window mode: `days` or `start_date` (default: `days`)
+- `DA_SINCE_DAYS`: How many days back to scan (default: `7`) — used when `DA_SCAN_WINDOW_MODE=days`
+- `DA_SINCE_START_DATE`: Start date `YYYY-MM-DD` (local time) — used when `DA_SCAN_WINDOW_MODE=start_date`
 - `DA_MAX_MESSAGES`: Max messages to process (default: `1000`)
 - `DA_DEBUG`: Set to `1` for verbose output
 - `DA_USE_LLM_EXTRACTION`: Set to `1` to enable LLM extraction

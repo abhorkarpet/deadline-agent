@@ -21,6 +21,7 @@ def main():
     if missing:
         print("Missing required env vars:", ", ".join(missing))
         print("Set DA_EMAIL_ADDRESS and DA_EMAIL_PASSWORD. Optional: DA_IMAP_HOST, DA_IMAP_PORT, DA_MAILBOX, DA_SINCE_DAYS, DA_MAX_MESSAGES")
+        print("Scan window (optional): DA_SCAN_WINDOW_MODE=days|start_date, DA_SINCE_DAYS=7, DA_SINCE_START_DATE=YYYY-MM-DD")
         return
 
     # Agent uses IMAP by default

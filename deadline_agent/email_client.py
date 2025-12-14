@@ -1,6 +1,6 @@
 import email
 import imaplib
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.header import decode_header, make_header
 from typing import Iterable, List, Optional
 
@@ -35,7 +35,7 @@ class EmailClient:
             if status != "OK":
                 return []
 
-            since_date = (datetime.utcnow() - timedelta(days=self.config.since_days)).strftime("%d-%b-%Y")
+            since_date = self.config.effective_since_date_local().strftime("%d-%b-%Y")
             status, data = conn.search(None, "(SINCE", since_date + ")")
             if status != "OK" or not data or not data[0]:
                 return []

@@ -3,7 +3,8 @@ from typing import List, Tuple
 
 from .config import AgentConfig
 from .email_client import EmailClient
-from .models import DeadlineItem
+from .gmail_api_client import GmailAPIClient
+from .models import DeadlineItem, EmailMessageData
 from .parsers import DeadlineExtractor
 from .feedback_learner import FeedbackLearner
 
@@ -27,7 +28,7 @@ class ScanStats:
 class DeadlineAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
-        self.client = EmailClient(config)
+        self.client = GmailAPIClient(config) if config.use_gmail_api else EmailClient(config)
         self.regex_extractor = DeadlineExtractor(reference_now=None)
         self.feedback_learner = FeedbackLearner()
         self.llm_extractor = None
@@ -46,7 +47,11 @@ class DeadlineAgent:
                         print(f"Warning: LLM extractor initialization failed: {e}")
                     self.llm_extractor = None
 
-    def collect_deadlines(self, progress_callback=None) -> Tuple[List[DeadlineItem], ScanStats]:
+    def fetch_emails_only(self) -> List[EmailMessageData]:
+        """Fetch emails without processing. Returns list of EmailMessageData."""
+        return self.client.fetch_recent_messages()
+    
+    def collect_deadlines(self, progress_callback=None, skip_llm=False) -> Tuple[List[DeadlineItem], ScanStats]:
         if progress_callback:
             progress_callback("Connecting to email server...", 0.0)
         
@@ -76,7 +81,7 @@ class DeadlineAgent:
             all_items.extend(regex_items)
             
             # Try LLM if enabled (slower, costs money, but catches more cases)
-            if self.llm_extractor:
+            if self.llm_extractor and not skip_llm:
                 try:
                     llm_items = self.llm_extractor.extract_from_message(msg)
                     all_items.extend(llm_items)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional
 
 from google.auth.transport.requests import Request
@@ -44,8 +44,15 @@ class GmailAPIClient:
         return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
     def fetch_recent_messages(self) -> List[EmailMessageData]:
-        # Query since X days; Gmail uses rfc822-like query with newer_than
-        query_parts = [f"newer_than:{self.config.since_days}d"]
+        # Mutually exclusive scan window:
+        # - days mode: newer_than:Nd
+        # - start_date mode: after:YYYY/MM/DD
+        mode = (self.config.scan_window_mode or "days").strip().lower()
+        if mode == "start_date":
+            cutoff = self.config.effective_since_date_local()
+            query_parts = [f"after:{cutoff.strftime('%Y/%m/%d')}"]
+        else:
+            query_parts = [f"newer_than:{self.config.since_days}d"]
         # Focus labels: INBOX by default
         label_ids = [self.config.mailbox] if self.config.mailbox else ["INBOX"]
 

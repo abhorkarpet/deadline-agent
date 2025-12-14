@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List
 
@@ -55,8 +55,52 @@ def get_config_from_ui() -> AgentConfig:
     imap_host = st.sidebar.text_input("IMAP host", value=os.getenv("DA_IMAP_HOST", "imap.gmail.com"))
     imap_port = st.sidebar.number_input("IMAP port", value=int(os.getenv("DA_IMAP_PORT", "993")))
     mailbox = st.sidebar.text_input("Mailbox", value=os.getenv("DA_MAILBOX", "INBOX"))
-    since_days = st.sidebar.number_input("Scan last N days", min_value=1, max_value=365, value=int(os.getenv("DA_SINCE_DAYS", "60")))
-    max_messages = st.sidebar.number_input("Max messages", min_value=10, max_value=5000, value=int(os.getenv("DA_MAX_MESSAGES", "50")))
+    
+    # Mutually exclusive scan window
+    scan_window_mode = st.sidebar.radio(
+        "Scan window",
+        options=["Last N days", "Start date"],
+        index=0,
+        help="Choose either a rolling window (last N days) or a specific start date.",
+    )
+
+    since_days_default = int(os.getenv("DA_SINCE_DAYS", "7"))
+    since_days = since_days_default
+    since_start_date_str = os.getenv("DA_SINCE_START_DATE", "")
+
+    if scan_window_mode == "Last N days":
+        since_days = st.sidebar.number_input(
+            "Last N days",
+            min_value=1,
+            max_value=365,
+            value=since_days_default,
+        )
+        since_start_date = ""
+        scan_window_mode_cfg = "days"
+    else:
+        # Default start date: env var if present, else today - 7 days
+        default_start = date.today() - timedelta(days=7)
+        if since_start_date_str:
+            try:
+                default_start = datetime.strptime(since_start_date_str.strip(), "%Y-%m-%d").date()
+            except Exception:
+                default_start = default_start
+        picked = st.sidebar.date_input(
+            "Start date",
+            value=default_start,
+            help="Emails received on/after this date will be scanned (local time).",
+        )
+        since_start_date = picked.strftime("%Y-%m-%d")
+        scan_window_mode_cfg = "start_date"
+
+    with st.sidebar.expander("Advanced", expanded=False):
+        max_messages = st.number_input(
+            "Max messages (safety cap)",
+            min_value=10,
+            max_value=5000,
+            value=int(os.getenv("DA_MAX_MESSAGES", "500")),
+            help="Stops scanning after this many messages, even if the date window would include more.",
+        )
     debug_mode = st.sidebar.toggle("🔍 Debug/Verbose mode", value=False, help="Show detailed scan statistics")
     
     st.sidebar.divider()
@@ -81,7 +125,9 @@ def get_config_from_ui() -> AgentConfig:
         email_username=email_address,
         email_password=email_password,
         mailbox=mailbox,
+        scan_window_mode=scan_window_mode_cfg,
         since_days=int(since_days),
+        since_start_date=since_start_date,
         max_messages=int(max_messages),
         use_gmail_api=False,
         debug=debug_mode,
@@ -172,22 +218,60 @@ def main():
     # Initialize confirmation skip state
     if "skip_scan_confirmation" not in st.session_state:
         st.session_state.skip_scan_confirmation = False
+    if "fetched_email_count" not in st.session_state:
+        st.session_state.fetched_email_count = None
+    if "waiting_llm_confirmation" not in st.session_state:
+        st.session_state.waiting_llm_confirmation = False
+    if "skip_llm_for_scan" not in st.session_state:
+        st.session_state.skip_llm_for_scan = False
+    
+    # Function to fetch emails first (for cost estimation)
+    def fetch_emails_for_cost(cfg):
+        """Fetch emails to get actual count for cost estimation."""
+        try:
+            if not cfg.email_address or not cfg.email_password:
+                st.error("Please provide your email address and app password in the sidebar.")
+                return False
+            
+            # Create agent with LLM disabled temporarily
+            cfg_no_llm = AgentConfig(
+                imap_host=cfg.imap_host,
+                imap_port=cfg.imap_port,
+                email_address=cfg.email_address,
+                email_username=cfg.email_username,
+                email_password=cfg.email_password,
+                mailbox=cfg.mailbox,
+                since_days=cfg.since_days,
+                max_messages=cfg.max_messages,
+                debug=cfg.debug,
+                use_gmail_api=cfg.use_gmail_api,
+                use_llm_extraction=False,  # Disable LLM for initial fetch
+                llm_api_key="",
+                llm_model=cfg.llm_model,
+                scan_window_mode=cfg.scan_window_mode,
+                since_start_date=cfg.since_start_date,
+            )
+            agent = DeadlineAgent(cfg_no_llm)
+            
+            status_text = st.empty()
+            status_text.text("Fetching emails...")
+            
+            messages = agent.fetch_emails_only()
+            st.session_state.fetched_email_count = len(messages)
+            status_text.empty()
+            return True
+        except Exception as e:
+            status_text.empty()
+            raise
     
     # Function to perform the actual scan
-    def perform_scan(cfg):
+    def perform_scan(cfg, skip_llm=False):
         """Execute the email scan with progress tracking."""
         try:
             # Validate configuration before attempting connection
             if not cfg.email_address or not cfg.email_password:
                 st.error("Please provide your email address and app password in the sidebar.")
                 return
-            
-            # Show cost estimate if LLM enabled
-            if cfg.use_llm_extraction:
-                estimated_emails = min(cfg.max_messages, 500)
-                cost_per_email = 0.0003 if cfg.llm_model == "gpt-4o-mini" else (0.003 if cfg.llm_model == "gpt-4o" else 0.01)
-                estimated_cost = estimated_emails * cost_per_email
-                st.info(f"💰 Estimated cost: ~${estimated_cost:.2f} - ${estimated_cost * 1.5:.2f} for this scan ({cfg.llm_model}) | [Check usage & costs](https://platform.openai.com/usage)")
             
             agent = DeadlineAgent(cfg)
             
@@ -200,7 +284,7 @@ def main():
                 status_text.text(message)
             
             try:
-                deadlines, stats = agent.collect_deadlines(progress_callback=update_progress)
+                deadlines, stats = agent.collect_deadlines(progress_callback=update_progress, skip_llm=skip_llm)
             finally:
                 # Clear progress indicators
                 progress_bar.empty()
@@ -286,20 +370,19 @@ def main():
         if "show_llm_confirmation" not in st.session_state:
             st.session_state.show_llm_confirmation = False
         
-        # Show confirmation dialog if needed
-        if st.session_state.show_llm_confirmation and cfg.use_llm_extraction:
-            # Calculate estimated cost
-            # gpt-4o-mini: ~$0.15 per 1M input tokens, ~$0.60 per 1M output tokens
-            # Average email: ~2000 tokens input, ~200 tokens output
-            # Cost per email: ~$0.0003 (very rough estimate)
-            estimated_emails = min(cfg.max_messages, 500)  # Conservative estimate
+        # Show confirmation dialog if waiting for LLM confirmation
+        if st.session_state.waiting_llm_confirmation and cfg.use_llm_extraction and st.session_state.fetched_email_count is not None:
+            # Calculate cost based on actual email count
+            actual_emails = st.session_state.fetched_email_count
             cost_per_email = 0.0003 if cfg.llm_model == "gpt-4o-mini" else (0.003 if cfg.llm_model == "gpt-4o" else 0.01)
-            estimated_cost = estimated_emails * cost_per_email
+            estimated_cost = actual_emails * cost_per_email
             
             with st.container(border=True):
-                st.warning("⚠️ **LLM Extraction Enabled**")
+                st.warning("⚠️ **LLM Extraction Cost Estimate**")
                 st.markdown(f"""
-                **Estimated cost:** ~${estimated_cost:.2f} - ${estimated_cost * 1.5:.2f} for up to {estimated_emails} emails
+                **Emails found:** {actual_emails} emails
+                
+                **Estimated cost:** ~${estimated_cost:.2f} - ${estimated_cost * 1.5:.2f}
                 
                 - Model: {cfg.llm_model}
                 - Cost varies based on email length
@@ -309,29 +392,38 @@ def main():
                 dont_remind = st.checkbox("Don't remind me again", key="dont_remind_llm")
                 col_confirm, col_cancel = st.columns(2)
                 with col_confirm:
-                    if st.button("Continue with scan", type="primary", key="confirm_scan"):
+                    if st.button("Continue with LLM extraction", type="primary", key="confirm_llm_scan"):
                         if dont_remind:
                             st.session_state.skip_scan_confirmation = True
-                        st.session_state.show_llm_confirmation = False
+                        st.session_state.waiting_llm_confirmation = False
                         st.session_state.trigger_scan = True
                         st.rerun()
                 with col_cancel:
-                    if st.button("Cancel", key="cancel_scan"):
-                        st.session_state.show_llm_confirmation = False
+                    if st.button("Skip LLM, use regex only", key="skip_llm_scan"):
+                        st.session_state.waiting_llm_confirmation = False
+                        st.session_state.trigger_scan = True
+                        st.session_state.skip_llm_for_scan = True
                         st.rerun()
         elif st.button("Authenticate & Scan", type="primary"):
-            # Check if we need to show confirmation
+            # If LLM is enabled, first fetch emails to show cost
             if cfg.use_llm_extraction and not st.session_state.skip_scan_confirmation:
-                st.session_state.show_llm_confirmation = True
-                st.rerun()
+                try:
+                    if fetch_emails_for_cost(cfg):
+                        st.session_state.waiting_llm_confirmation = True
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error fetching emails: {str(e)}")
             else:
-                # Proceed directly with scan
-                perform_scan(cfg)
+                # Proceed directly with scan (LLM disabled or confirmation skipped)
+                perform_scan(cfg, skip_llm=(getattr(st.session_state, 'skip_llm_for_scan', False)))
     
     # Trigger scan after confirmation dialog is dismissed
     if st.session_state.trigger_scan:
         st.session_state.trigger_scan = False
-        perform_scan(cfg)
+        skip_llm = getattr(st.session_state, 'skip_llm_for_scan', False)
+        if skip_llm:
+            st.session_state.skip_llm_for_scan = False
+        perform_scan(cfg, skip_llm=skip_llm)
     with col2:
         if st.button("Clear Results"):
             st.session_state.deadlines = []
@@ -410,7 +502,8 @@ def main():
                 st.markdown("**📝 LLM Summary:**")
                 st.info(email_summary)
                 if email_excerpt:
-                    with st.expander("📄 View original email excerpt", expanded=False):
+                    show_excerpt = st.checkbox("📄 Show original email excerpt", key=f"show_excerpt_{actual_idx}", value=False)
+                    if show_excerpt:
                         st.text_area("", value=email_excerpt, height=100, disabled=True, key=f"excerpt_{actual_idx}", label_visibility="collapsed")
             elif email_excerpt and email_excerpt.strip():
                 st.markdown("**📄 Email Excerpt:**")
