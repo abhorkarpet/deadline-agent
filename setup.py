@@ -8,7 +8,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="deadline-agent",
-    version="0.1.0",
+    version="3.0.0",
     author="Your Name",
     description="An intelligent email scanning agent for tracking cancellation deadlines and subscription renewals",
     long_description=long_description,

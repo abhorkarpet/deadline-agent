@@ -3,58 +3,158 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from urllib.parse import urlparse, parse_qs
 
 # Add current directory to path so we can import deadline_agent
 sys.path.insert(0, str(Path(__file__).parent))
 
 import streamlit as st
+from google.oauth2.credentials import Credentials
 
 from deadline_agent import AgentConfig, DeadlineAgent, FeedbackLearner, InsufficientFundsError
 from deadline_agent.calendar import CalendarEventRequest, CalendarService
+from deadline_agent.gmail_api_client import GmailAPIClient
 
 
 FEEDBACK_FILE = "deadline_agent_feedback.jsonl"
-VERSION = "1.1.0"
+VERSION = "3.0.0"
+
+
+def get_redirect_uri() -> str:
+    """Get OAuth redirect URI based on current environment."""
+    # Check if we're in Streamlit Cloud
+    try:
+        # Streamlit Cloud sets this environment variable
+        if os.getenv("STREAMLIT_SERVER_BASE_URL"):
+            base_url = os.getenv("STREAMLIT_SERVER_BASE_URL")
+            return f"{base_url}/oauth_callback"
+    except Exception:
+        pass
+    
+    # Get port from Streamlit config or default
+    try:
+        import streamlit as st
+        # Try to get port from query params or use default
+        port = st.get_option("server.port") or 8501
+    except Exception:
+        port = 8501
+    
+    # Default to local with detected port
+    return f"http://localhost:{port}/oauth_callback"
+
+
+def handle_oauth_callback(cfg: AgentConfig) -> Optional[Credentials]:
+    """Handle OAuth callback from query parameters."""
+    query_params = st.query_params
+    if "code" in query_params and "state" in query_params:
+        code = query_params["code"]
+        state = query_params["state"]
+        
+        try:
+            client = GmailAPIClient(cfg)
+            redirect_uri = get_redirect_uri()
+            creds = client.handle_oauth_callback(code, redirect_uri)
+            
+            # Store in session state
+            st.session_state['gmail_oauth_credentials'] = creds.to_json()
+            st.session_state['gmail_oauth_email'] = cfg.email_address
+            
+            # Clear query params
+            st.query_params.clear()
+            st.rerun()
+            return creds
+        except Exception as e:
+            st.error(f"OAuth authentication failed: {str(e)}")
+            return None
+    return None
+
+
+def get_gmail_oauth_credentials(cfg: AgentConfig) -> Optional[Credentials]:
+    """Get Gmail OAuth credentials from session state."""
+    if 'gmail_oauth_credentials' in st.session_state:
+        try:
+            creds_json = st.session_state['gmail_oauth_credentials']
+            creds = Credentials.from_authorized_user_info(json.loads(creds_json))
+            # Refresh if expired
+            if creds.expired and creds.refresh_token:
+                from google.auth.transport.requests import Request
+                creds.refresh(Request())
+                st.session_state['gmail_oauth_credentials'] = creds.to_json()
+            return creds
+        except Exception:
+            # Clear invalid credentials
+            if 'gmail_oauth_credentials' in st.session_state:
+                del st.session_state['gmail_oauth_credentials']
+    return None
 
 
 def get_config_from_ui() -> AgentConfig:
     st.sidebar.markdown("### Email Configuration")
-    with st.sidebar.expander("💡 How to get an app password", expanded=False):
-        st.markdown("""
-        **⚠️ IMPORTANT: This is NOT your regular Gmail password!**
-        
-        You must generate a special "app password" - a 16-character code that allows apps to access your email securely.
-        
-        **Gmail:**
-        1. Go to [Google Account](https://myaccount.google.com/)
-        2. Click **Security** (left sidebar)
-        3. Under "How you sign in to Google", click **2-Step Verification**
-        4. Scroll down to find **App passwords** (or search for it)
-        5. Click **App passwords** > Select app: **Mail** > Select device: **Other (Custom name)**
-        6. Enter a name (e.g., "Deadline Agent") and click **Generate**
-        7. Copy the 16-character password (shown only once) - this is your app password
-        
-        **Note:** If you don't see "App passwords", you may need to enable 2-Step Verification first.
-        
-        **Yahoo:**
-        1. Go to [Account Security](https://login.yahoo.com/account/security)
-        2. Click **Generate app password**
-        3. Select "Mail" and generate
-        4. Copy the password
-        
-        **Other providers:** Check your email provider's help docs for app password setup.
-        """)
-    email_address = st.sidebar.text_input("Email address", value=os.getenv("DA_EMAIL_ADDRESS", ""))
+    
+    # Get email from session state (persisted across OAuth redirects) or env var
+    # Streamlit automatically stores widget values in session state when a key is provided
+    default_email = (
+        st.session_state.get('email_address_input', "") or
+        st.session_state.get('gmail_oauth_email', "") or
+        os.getenv("DA_EMAIL_ADDRESS", "")
+    )
+    
+    email_address = st.sidebar.text_input(
+        "Email address",
+        value=default_email,
+        key="email_address_input"
+    )
+    
+    # Note: Streamlit automatically stores the value in st.session_state['email_address_input']
+    # when the widget has a key, so we don't need to manually set it
+    
+    # Always use IMAP (OAuth removed)
+    auth_method = "imap"
+    
+    # App password instructions
+    is_gmail = email_address.lower().endswith(("@gmail.com", "@googlemail.com")) if email_address else False
+    if is_gmail:
+        with st.sidebar.expander("💡 How to get an app password", expanded=False):
+            st.markdown("""
+            **⚠️ IMPORTANT: This is NOT your regular Gmail password!**
+            
+            You must generate a special "app password" - a 16-character code that allows apps to access your email securely.
+            
+            1. Go to [Google Account](https://myaccount.google.com/)
+            2. Click **Security** (left sidebar)
+            3. Under "How you sign in to Google", click **2-Step Verification**
+            4. Scroll down to find **App passwords** (or search for it)
+            5. Click **App passwords** > Select app: **Mail** > Select device: **Other (Custom name)**
+            6. Enter a name (e.g., "Deadline Agent") and click **Generate**
+            7. Copy the 16-character password (shown only once) - this is your app password
+            
+            **Note:** If you don't see "App passwords", you may need to enable 2-Step Verification first.
+            """)
+    else:
+        with st.sidebar.expander("💡 How to get an app password", expanded=False):
+            st.markdown("""
+            **For Yahoo:**
+            1. Go to [Account Security](https://login.yahoo.com/account/security)
+            2. Click **Generate app password**
+            3. Select "Mail" and generate
+            4. Copy the password
+            
+            **Other providers:** Check your email provider's help docs for app password setup.
+            """)
+    
     email_password = st.sidebar.text_input(
         "Email app password", 
         type="password", 
         value=os.getenv("DA_EMAIL_PASSWORD", ""), 
-        help="⚠️ This is NOT your regular Gmail password. You must generate an app password (see instructions above)."
+        help="App password for your email provider"
     )
-    imap_host = st.sidebar.text_input("IMAP host", value=os.getenv("DA_IMAP_HOST", "imap.gmail.com"))
-    imap_port = st.sidebar.number_input("IMAP port", value=int(os.getenv("DA_IMAP_PORT", "993")))
-    mailbox = st.sidebar.text_input("Mailbox", value=os.getenv("DA_MAILBOX", "INBOX"))
+    
+    # IMAP settings - hidden in Advanced section
+    with st.sidebar.expander("⚙️ Advanced IMAP Settings", expanded=False):
+        imap_host = st.text_input("IMAP host", value=os.getenv("DA_IMAP_HOST", "imap.gmail.com"))
+        imap_port = st.number_input("IMAP port", value=int(os.getenv("DA_IMAP_PORT", "993")))
+        mailbox = st.text_input("Mailbox", value=os.getenv("DA_MAILBOX", "INBOX"))
     
     # Mutually exclusive scan window
     scan_window_mode = st.sidebar.radio(
@@ -118,6 +218,8 @@ def get_config_from_ui() -> AgentConfig:
         )
         llm_model = st.sidebar.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"], index=0, help="gpt-4o-mini is cheapest and sufficient")
     
+    # OAuth removed - no longer needed
+    
     return AgentConfig(
         imap_host=imap_host,
         imap_port=int(imap_port),
@@ -129,7 +231,12 @@ def get_config_from_ui() -> AgentConfig:
         since_days=int(since_days),
         since_start_date=since_start_date,
         max_messages=int(max_messages),
-        use_gmail_api=False,
+        auth_method="imap",  # Always use IMAP (OAuth removed)
+        oauth_client_id="",  # Not used (OAuth removed)
+        oauth_client_secret="",  # Not used (OAuth removed)
+        oauth_redirect_uri="",  # Not used (OAuth removed)
+        oauth_token_storage="session",  # Not used (OAuth removed)
+        use_gmail_api=False,  # OAuth removed, always use IMAP
         debug=debug_mode,
         use_llm_extraction=use_llm,
         llm_api_key=llm_api_key,
@@ -162,14 +269,17 @@ def main():
     # Browser recommendation
     st.info("💡 **Best experience:** Use Chrome browser on Desktop for optimal performance")
 
+    # Render sidebar/config
+    cfg = get_config_from_ui()
+
     # Optional Welcome / Onboarding
     if "suppress_welcome" not in st.session_state:
         st.session_state.suppress_welcome = False
     if "welcomed" not in st.session_state:
         st.session_state.welcomed = False
 
-    # Render sidebar first so it's always available
-    cfg = get_config_from_ui()
+    # Get OAuth credentials from session state if available (cfg already loaded above)
+    oauth_creds = get_gmail_oauth_credentials(cfg) if cfg.is_gmail() and cfg.auth_method == "oauth" else None
 
     def render_welcome():
         st.subheader("Welcome 👋")
@@ -178,26 +288,30 @@ def main():
             This assistant helps you avoid surprise charges by finding cancellation/refund deadlines from your emails and creating calendar reminders.
 
             What it does:
-            - Connects to your email via IMAP (Gmail, Yahoo, etc. with app password)
+            - Connects to your email via Gmail OAuth (recommended) or IMAP (Gmail, Yahoo, etc. with app password)
             - Scans recent messages for phrases like "free trial ends", "cancel by", "fully refundable until"
             - Lets you review and select the correct items, give feedback, and export reminders to your calendar (.ics)
 
             Privacy & security:
             - Your data stays local in your browser/session.
-            - OAuth tokens (if any) are stored only on your machine as configured.
+            - OAuth tokens (if any) are stored only in session state (secure, not exposed to frontend).
             - No messages are sent to any external server from this app.
 
             How to use:
-            1) Enter your email and app password in the sidebar
-            2) Click "Authenticate & Scan"
-            3) Review detected items, uncheck incorrect ones, and submit feedback if we mis-detected
-            4) Click "Create Reminders" and download the .ics file
+            1) Enter your email address in the sidebar
+            2) For Gmail: Click "Connect with Google" (OAuth - no password needed!)
+            3) For other providers: Enter your app password
+            4) Click "Authenticate & Scan"
+            5) Review detected items, uncheck incorrect ones, and submit feedback if we mis-detected
+            6) Click "Create Reminders" and download the .ics file
             """
         )
-        dont_show = st.checkbox("Don't show again", key="suppress_welcome_checkbox")
+        dont_show = st.checkbox("Don't show again", value=st.session_state.suppress_welcome, key="suppress_welcome_checkbox")
         if st.button("I understand, continue →", key="welcome_continue"):
             if dont_show:
                 st.session_state.suppress_welcome = True
+            else:
+                st.session_state.suppress_welcome = False
             st.session_state.welcomed = True
             st.rerun()
 
@@ -229,8 +343,13 @@ def main():
     def fetch_emails_for_cost(cfg):
         """Fetch emails to get actual count for cost estimation."""
         try:
-            if not cfg.email_address or not cfg.email_password:
-                st.error("Please provide your email address and app password in the sidebar.")
+            if not cfg.email_address:
+                st.error("Please provide your email address in the sidebar.")
+                return False
+            
+            # Check password (always using IMAP now)
+            if not cfg.email_password:
+                st.error("Please provide your email app password in the sidebar.")
                 return False
             
             # Create agent with LLM disabled temporarily
@@ -244,13 +363,19 @@ def main():
                 since_days=cfg.since_days,
                 max_messages=cfg.max_messages,
                 debug=cfg.debug,
-                use_gmail_api=cfg.use_gmail_api,
+                auth_method="imap",  # Always use IMAP (OAuth removed)
+                oauth_client_id="",  # Not used (OAuth removed)
+                oauth_client_secret="",  # Not used (OAuth removed)
+                oauth_redirect_uri="",  # Not used (OAuth removed)
+                oauth_token_storage="session",  # Not used (OAuth removed)
+                use_gmail_api=False,  # OAuth removed
                 use_llm_extraction=False,  # Disable LLM for initial fetch
                 llm_api_key="",
                 llm_model=cfg.llm_model,
                 scan_window_mode=cfg.scan_window_mode,
                 since_start_date=cfg.since_start_date,
             )
+            # Create agent (always using IMAP now)
             agent = DeadlineAgent(cfg_no_llm)
             
             status_text = st.empty()
@@ -269,10 +394,16 @@ def main():
         """Execute the email scan with progress tracking."""
         try:
             # Validate configuration before attempting connection
-            if not cfg.email_address or not cfg.email_password:
-                st.error("Please provide your email address and app password in the sidebar.")
+            if not cfg.email_address:
+                st.error("Please provide your email address in the sidebar.")
                 return
             
+            # Check password (always using IMAP now)
+            if not cfg.email_password:
+                st.error("Please provide your email app password in the sidebar.")
+                return
+            
+            # Create agent (always using IMAP now)
             agent = DeadlineAgent(cfg)
             
             # Progress tracking

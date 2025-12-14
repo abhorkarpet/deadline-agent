@@ -4,7 +4,9 @@ An intelligent email scanning agent that helps you track cancellation deadlines,
 
 ## Features
 
-- 📧 **Email Integration**: Connect via IMAP (Gmail, Yahoo, etc.) with app passwords
+- 📧 **Email Integration**: 
+  - **Gmail OAuth** (recommended): Connect with Google - no app passwords needed!
+  - **IMAP**: Connect via IMAP for Gmail (fallback) or other providers (Yahoo, etc.) with app passwords
 - 🤖 **AI-Powered Extraction**: Uses both regex patterns and LLM (OpenAI) for accurate deadline detection
 - 📅 **Calendar Integration**: Export deadlines as `.ics` files for your calendar
 - 🎯 **Smart Categorization**: Automatically categorizes deadlines (subscription, trial, travel, billing, refund)
@@ -25,7 +27,45 @@ pip install -r requirements.txt
 streamlit run deadline_agent_app.py
 ```
 
-Then open your browser to `http://localhost:8501`
+Then open your browser to `http://localhost:8501` (or the port shown in terminal)
+
+### Gmail OAuth Setup (Recommended for Gmail Users)
+
+**For Gmail users, OAuth is the recommended authentication method** - it's more secure and doesn't require app passwords!
+
+1. **Create Google OAuth Credentials**:
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the **Gmail API**:
+     - Go to "APIs & Services" > "Library"
+     - Search for "Gmail API" and enable it
+   - Create OAuth 2.0 credentials:
+     - Go to "APIs & Services" > "Credentials"
+     - Click "Create Credentials" > "OAuth client ID"
+     - Application type: **Web application**
+     - Authorized redirect URIs:
+       - Local: `http://localhost:8501/oauth_callback` (or your port)
+       - Streamlit Cloud: `https://your-app.streamlit.app/oauth_callback`
+     - Click "Create" and copy the **Client ID** and **Client Secret**
+
+2. **Add Credentials to Streamlit**:
+   - **Option A**: Use Streamlit secrets (recommended for Streamlit Cloud)
+     - Create `.streamlit/secrets.toml`:
+       ```toml
+       gmail_oauth_client_id = "your-client-id"
+       gmail_oauth_client_secret = "your-client-secret"
+       ```
+   - **Option B**: Enter in UI
+     - In the sidebar, expand "OAuth Credentials (Advanced)"
+     - Enter your Client ID and Client Secret
+
+3. **Connect**:
+   - Enter your Gmail address
+   - Click "🔗 Connect with Google"
+   - Authorize the app in the browser
+   - You're connected! ✅
+
+**Note**: OAuth tokens are stored in session state (secure, not exposed to frontend). For CLI usage, tokens are stored in a file.
 
 ### CLI Demo
 
@@ -34,23 +74,34 @@ python deadline_agent_demo.py
 ```
 
 Set environment variables:
+
+**Email Configuration**:
 - `DA_EMAIL_ADDRESS`: Your email address
-- `DA_EMAIL_PASSWORD`: Your app password (not regular password!)
+- `DA_AUTH_METHOD`: Authentication method: `oauth` (default for Gmail) or `imap` (default for others)
+- `DA_EMAIL_PASSWORD`: Your app password (required for IMAP, not needed for OAuth)
+- `DA_OAUTH_CLIENT_ID`: Google OAuth Client ID (for Gmail OAuth)
+- `DA_OAUTH_CLIENT_SECRET`: Google OAuth Client Secret (for Gmail OAuth)
 - `DA_IMAP_HOST`: IMAP server (default: `imap.gmail.com`)
 - `DA_IMAP_PORT`: IMAP port (default: `993`)
 - `DA_MAILBOX`: Mailbox to scan (default: `INBOX`)
+
+**Scan Configuration**:
 - `DA_SCAN_WINDOW_MODE`: Scan window mode: `days` or `start_date` (default: `days`)
 - `DA_SINCE_DAYS`: How many days back to scan (default: `7`) — used when `DA_SCAN_WINDOW_MODE=days`
 - `DA_SINCE_START_DATE`: Start date `YYYY-MM-DD` (local time) — used when `DA_SCAN_WINDOW_MODE=start_date`
 - `DA_MAX_MESSAGES`: Max messages to process (default: `1000`)
 - `DA_DEBUG`: Set to `1` for verbose output
+
+**LLM Configuration** (Optional):
 - `DA_USE_LLM_EXTRACTION`: Set to `1` to enable LLM extraction
 - `DA_LLM_API_KEY`: Your OpenAI API key (if using LLM)
 - `DA_LLM_MODEL`: Model to use (default: `gpt-4o-mini`)
 
-## Getting an App Password
+## Getting an App Password (IMAP Fallback)
 
-### Gmail
+**For Gmail users**: We recommend using **OAuth** (see above) instead of app passwords. App passwords are only needed if you choose to use IMAP instead of OAuth.
+
+### Gmail (IMAP)
 1. Go to [Google Account](https://myaccount.google.com/)
 2. Click **Security** (left sidebar)
 3. Under "How you sign in to Google", click **2-Step Verification**

@@ -20,13 +20,32 @@ class AgentConfig:
     since_start_date: str = ""  # YYYY-MM-DD
     max_messages: int = 1000
     debug: bool = False
-    use_gmail_api: bool = False
+    use_gmail_api: bool = False  # Deprecated: use auth_method instead
     use_llm_extraction: bool = False
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"  # or gpt-4, claude-3-haiku, etc.
-    oauth_client_secret_path: str = ""
+    # OAuth configuration
+    auth_method: str = "oauth"  # "oauth" | "imap" - auto-detected for Gmail
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+    oauth_redirect_uri: str = ""  # Auto-detect: local vs Streamlit Cloud
+    oauth_token_storage: str = "session"  # "session" | "file" - "session" for Streamlit, "file" for CLI
+    oauth_client_secret_path: str = ""  # Legacy: path to client_secret.json file
     oauth_token_path: str = "token.json"
     oauth_scopes: tuple = ("https://www.googleapis.com/auth/gmail.readonly",)
+
+    def is_gmail(self) -> bool:
+        """Check if email address is Gmail."""
+        if not self.email_address:
+            return False
+        email_lower = self.email_address.lower()
+        return email_lower.endswith(("@gmail.com", "@googlemail.com"))
+
+    def get_default_auth_method(self) -> str:
+        """Get default auth method based on email provider."""
+        if self.is_gmail():
+            return "oauth"
+        return "imap"
 
     def effective_since_date_local(self) -> date:
         """
@@ -51,11 +70,12 @@ class AgentConfig:
 
     @staticmethod
     def from_env(prefix: str = "DA_") -> "AgentConfig":
-        return AgentConfig(
+        email_address = os.getenv(f"{prefix}EMAIL_ADDRESS", "")
+        config = AgentConfig(
             imap_host=os.getenv(f"{prefix}IMAP_HOST", "imap.gmail.com"),
             imap_port=int(os.getenv(f"{prefix}IMAP_PORT", "993")),
-            email_address=os.getenv(f"{prefix}EMAIL_ADDRESS", ""),
-            email_username=os.getenv(f"{prefix}EMAIL_USERNAME", os.getenv(f"{prefix}EMAIL_ADDRESS", "")),
+            email_address=email_address,
+            email_username=os.getenv(f"{prefix}EMAIL_USERNAME", email_address),
             email_password=os.getenv(f"{prefix}EMAIL_PASSWORD", ""),
             mailbox=os.getenv(f"{prefix}MAILBOX", "INBOX"),
             scan_window_mode=os.getenv(f"{prefix}SCAN_WINDOW_MODE", "days"),
@@ -67,11 +87,20 @@ class AgentConfig:
             use_llm_extraction=os.getenv(f"{prefix}USE_LLM_EXTRACTION", "0") in ("1", "true", "True"),
             llm_api_key=os.getenv(f"{prefix}LLM_API_KEY", ""),
             llm_model=os.getenv(f"{prefix}LLM_MODEL", "gpt-4o-mini"),
+            auth_method=os.getenv(f"{prefix}AUTH_METHOD", ""),  # Will be auto-set if empty
+            oauth_client_id=os.getenv(f"{prefix}OAUTH_CLIENT_ID", ""),
+            oauth_client_secret=os.getenv(f"{prefix}OAUTH_CLIENT_SECRET", ""),
+            oauth_redirect_uri=os.getenv(f"{prefix}OAUTH_REDIRECT_URI", ""),
+            oauth_token_storage=os.getenv(f"{prefix}OAUTH_TOKEN_STORAGE", "file"),  # Default to file for CLI
             oauth_client_secret_path=os.getenv(f"{prefix}OAUTH_CLIENT_SECRET_PATH", ""),
             oauth_token_path=os.getenv(f"{prefix}OAUTH_TOKEN_PATH", "token.json"),
             oauth_scopes=tuple(
                 (os.getenv(f"{prefix}OAUTH_SCOPES", "https://www.googleapis.com/auth/gmail.readonly").split(","))
             ),
         )
+        # Auto-detect auth_method if not set
+        if not config.auth_method:
+            config.auth_method = config.get_default_auth_method()
+        return config
 
 
