@@ -734,6 +734,22 @@ def main():
                 mime="text/calendar",
             )
 
+    # Page footer
+    st.divider()
+    footer_col1, footer_col2, footer_col3 = st.columns([2, 1, 2])
+    with footer_col1:
+        st.markdown("")
+    with footer_col2:
+        st.markdown(
+            f"<div style='text-align: center; color: #666; font-size: 0.85em; padding: 10px 0;'>"
+            f"Deadline Agent v{VERSION} | "
+            f"<a href='mailto:smartretireai@gmail.com' style='color: #666; text-decoration: none;'>About Us</a>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with footer_col3:
+        st.markdown("")
+
     # Feedback section
     st.sidebar.divider()
     with st.sidebar.expander("📊 Feedback Analytics", expanded=False):
