@@ -273,10 +273,14 @@ def main():
     cfg = get_config_from_ui()
 
     # Optional Welcome / Onboarding
+    # Initialize session state only once - these should persist across reruns
     if "suppress_welcome" not in st.session_state:
         st.session_state.suppress_welcome = False
     if "welcomed" not in st.session_state:
         st.session_state.welcomed = False
+    
+    # Ensure welcomed stays True once set - never reset it to False
+    # This prevents the welcome from showing again after it's been dismissed
 
     # Get OAuth credentials from session state if available (cfg already loaded above)
     oauth_creds = get_gmail_oauth_credentials(cfg) if cfg.is_gmail() and cfg.auth_method == "oauth" else None
@@ -306,8 +310,16 @@ def main():
             6) Click "Create Reminders" and download the .ics file
             """
         )
-        dont_show = st.checkbox("Don't show again", value=st.session_state.suppress_welcome, key="suppress_welcome_checkbox")
+        # Use a separate state variable for the checkbox to avoid affecting suppress_welcome during reruns
+        # Only update suppress_welcome when the button is clicked
+        checkbox_key = "welcome_dont_show_checkbox"
+        if checkbox_key not in st.session_state:
+            st.session_state[checkbox_key] = st.session_state.suppress_welcome
+        
+        dont_show = st.checkbox("Don't show again", value=st.session_state[checkbox_key], key=checkbox_key)
+        
         if st.button("I understand, continue →", key="welcome_continue"):
+            # Only update suppress_welcome when button is clicked, not on checkbox interaction
             if dont_show:
                 st.session_state.suppress_welcome = True
             else:
@@ -316,7 +328,9 @@ def main():
             st.rerun()
 
     # Show welcome only if not suppressed and not yet welcomed
-    if not st.session_state.suppress_welcome and not st.session_state.welcomed:
+    # Once welcomed is True, it stays True for the session - this prevents showing welcome again on reruns
+    should_show_welcome = not st.session_state.suppress_welcome and not st.session_state.welcomed
+    if should_show_welcome:
         with st.container(border=True):
             render_welcome()
         # Don't stop - allow sidebar to remain visible
