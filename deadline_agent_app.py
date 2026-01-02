@@ -18,7 +18,7 @@ from deadline_agent.gmail_api_client import GmailAPIClient
 
 
 FEEDBACK_FILE = "deadline_agent_feedback.jsonl"
-VERSION = "3.0.0"
+VERSION = "3.5"
 
 
 def get_redirect_uri() -> str:
@@ -174,6 +174,7 @@ def get_config_from_ui() -> AgentConfig:
             min_value=1,
             max_value=365,
             value=since_days_default,
+            help="Scan emails from the last N days. For example, 7 means scan emails from the past week."
         )
         since_start_date = ""
         scan_window_mode_cfg = "days"
@@ -263,11 +264,31 @@ def store_feedback(item, reason: str):
 
 
 def main():
+    # Set page config (must be first Streamlit command)
+    st.set_page_config(
+        page_title="Deadline Agent",
+        page_icon="⏰",  # Alarm clock emoji as favicon
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
     st.title("Deadline Agent")
     st.caption("Authenticate, scan inbox for deadlines, review results, and create reminders")
     
-    # Browser recommendation
-    st.info("💡 **Best experience:** Use Chrome browser on Desktop for optimal performance")
+    # Browser recommendation - hide after first view
+    if "hide_browser_tip" not in st.session_state:
+        st.session_state.hide_browser_tip = False
+    
+    if not st.session_state.hide_browser_tip:
+        browser_tip_container = st.container()
+        with browser_tip_container:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.info("💡 **Best experience:** Use Chrome browser on Desktop for optimal performance")
+            with col2:
+                if st.button("Dismiss", key="dismiss_browser_tip", use_container_width=True):
+                    st.session_state.hide_browser_tip = True
+                    st.rerun()
 
     # Render sidebar/config
     cfg = get_config_from_ui()
@@ -352,6 +373,12 @@ def main():
         st.session_state.waiting_llm_confirmation = False
     if "skip_llm_for_scan" not in st.session_state:
         st.session_state.skip_llm_for_scan = False
+    if "interrupt_scan" not in st.session_state:
+        st.session_state.interrupt_scan = False
+    if "fetched_emails" not in st.session_state:
+        st.session_state.fetched_emails = None
+    if "scan_in_progress" not in st.session_state:
+        st.session_state.scan_in_progress = False
     
     # Function to fetch emails first (for cost estimation)
     def fetch_emails_for_cost(cfg):
@@ -403,8 +430,107 @@ def main():
             status_text.empty()
             raise
     
+    # Function to process pre-fetched emails
+    def process_fetched_emails(cfg, messages, skip_llm=False):
+        """Process already-fetched emails without reconnecting."""
+        from deadline_agent.agent import ScanStats
+        
+        agent = DeadlineAgent(cfg)
+        
+        # Progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        interrupt_button_placeholder = st.empty()
+        
+        # Show interrupt button once at the start
+        if not st.session_state.interrupt_scan:
+            with interrupt_button_placeholder.container():
+                if st.button("⏹️ Interrupt Analysis", key="interrupt_analysis_btn", type="secondary"):
+                    st.session_state.interrupt_scan = True
+                    st.rerun()
+        
+        def update_progress(message: str, progress: float):
+            if st.session_state.interrupt_scan:
+                raise KeyboardInterrupt("Scan interrupted by user")
+            progress_bar.progress(progress)
+            status_text.text(message)
+        
+        try:
+            # Process emails directly
+            update_progress(f"Processing {len(messages)} fetched emails...", 0.1)
+            
+            all_items = []
+            senders = set()
+            sample_subjects = []
+            
+            total = len(messages)
+            batch_size = 100
+            num_batches = (total + batch_size - 1) // batch_size
+            
+            for batch_idx in range(num_batches):
+                if st.session_state.interrupt_scan:
+                    raise KeyboardInterrupt("Analysis interrupted by user")
+                
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, total)
+                batch = messages[start_idx:end_idx]
+                
+                if total > 0:
+                    progress_pct = 0.1 + (start_idx / total) * 0.8
+                    update_progress(f"Processing batch {batch_idx + 1}/{num_batches} (emails {start_idx + 1}-{end_idx}/{total})...", progress_pct)
+                
+                for msg in batch:
+                    senders.add(msg.sender)
+                    if len(sample_subjects) < 5:
+                        sample_subjects.append(msg.subject[:60])
+                    
+                    # Try regex first
+                    regex_items = agent.regex_extractor.extract_from_message(msg)
+                    all_items.extend(regex_items)
+                    
+                    # Try LLM if enabled
+                    if agent.llm_extractor and not skip_llm:
+                        try:
+                            llm_items = agent.llm_extractor.extract_from_message(msg)
+                            all_items.extend(llm_items)
+                        except Exception as e:
+                            from deadline_agent.llm_extractor import InsufficientFundsError
+                            if isinstance(e, InsufficientFundsError):
+                                raise
+                            if cfg.debug:
+                                print(f"LLM extraction error for {msg.subject}: {e}")
+            
+            update_progress(f"Found {len(all_items)} potential deadlines. Applying filters...", 0.9)
+            
+            # Apply feedback-based filtering
+            filtered_items = agent.feedback_learner.apply_feedback_learning(all_items)
+            
+            update_progress(f"Complete! Found {len(filtered_items)} deadlines.", 1.0)
+            
+            stats = ScanStats(
+                emails_fetched=len(messages),
+                emails_processed=len(messages),
+                deadlines_found=len(filtered_items),
+                unique_senders=len(senders),
+                sample_subjects=sample_subjects[:5],
+            )
+            
+            return sorted(filtered_items), stats
+        except KeyboardInterrupt:
+            interrupt_button_placeholder.empty()
+            progress_bar.empty()
+            status_text.empty()
+            st.session_state.interrupt_scan = False
+            st.session_state.scan_in_progress = False
+            st.warning("⚠️ Analysis interrupted. Emails are already fetched. Click 'Continue Analysis' to process them.")
+            raise
+        finally:
+            interrupt_button_placeholder.empty()
+            progress_bar.empty()
+            status_text.empty()
+    
     # Function to perform the actual scan
-    def perform_scan(cfg, skip_llm=False):
+    def perform_scan(cfg, skip_llm=False, use_fetched_emails=False):
         """Execute the email scan with progress tracking."""
         try:
             # Validate configuration before attempting connection
@@ -417,24 +543,75 @@ def main():
                 st.error("Please provide your email app password in the sidebar.")
                 return
             
-            # Create agent (always using IMAP now)
-            agent = DeadlineAgent(cfg)
+            # Reset interrupt flag
+            st.session_state.interrupt_scan = False
+            st.session_state.scan_in_progress = True
             
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # If we have pre-fetched emails, just process them
+            if use_fetched_emails and st.session_state.fetched_emails:
+                messages = st.session_state.fetched_emails
+                deadlines, stats = process_fetched_emails(cfg, messages, skip_llm=skip_llm)
+            else:
+                # Two-phase approach: fetch first, then process
+                agent = DeadlineAgent(cfg)
+                
+                # Phase 1: Fetch emails
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                interrupt_button_placeholder = st.empty()
+                
+                status_text.text("Connecting to email server...")
+                progress_bar.progress(0.05)
+                
+                # Show interrupt button during fetch
+                with interrupt_button_placeholder.container():
+                    if st.button("⏹️ Interrupt Connection", key="interrupt_fetch_btn", type="secondary"):
+                        st.session_state.interrupt_scan = True
+                        st.session_state.scan_in_progress = False
+                        progress_bar.empty()
+                        status_text.empty()
+                        interrupt_button_placeholder.empty()
+                        st.warning("⚠️ Connection interrupted. No emails were fetched.")
+                        return
+                
+                try:
+                    # Fetch emails
+                    if st.session_state.interrupt_scan:
+                        raise KeyboardInterrupt("Connection interrupted")
+                    
+                    messages = agent.fetch_emails_only()
+                    st.session_state.fetched_emails = messages
+                    emails_fetched = len(messages)
+                    
+                    if st.session_state.interrupt_scan:
+                        raise KeyboardInterrupt("Connection interrupted")
+                    
+                    progress_bar.progress(0.1)
+                    status_text.text(f"Fetched {emails_fetched} emails. Starting analysis...")
+                    
+                    # Clear interrupt button for fetch phase
+                    interrupt_button_placeholder.empty()
+                    
+                    # Phase 2: Process emails
+                    deadlines, stats = process_fetched_emails(cfg, messages, skip_llm=skip_llm)
+                    
+                except KeyboardInterrupt:
+                    interrupt_button_placeholder.empty()
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.session_state.interrupt_scan = False
+                    st.session_state.scan_in_progress = False
+                    if st.session_state.fetched_emails:
+                        st.warning("⚠️ Connection interrupted. However, emails were already fetched. Click 'Continue Analysis' below to process them.")
+                    else:
+                        st.warning("⚠️ Connection interrupted. No emails were fetched.")
+                    return
+                finally:
+                    interrupt_button_placeholder.empty()
+                    progress_bar.empty()
+                    status_text.empty()
             
-            def update_progress(message: str, progress: float):
-                progress_bar.progress(progress)
-                status_text.text(message)
-            
-            try:
-                deadlines, stats = agent.collect_deadlines(progress_callback=update_progress, skip_llm=skip_llm)
-            finally:
-                # Clear progress indicators
-                progress_bar.empty()
-                status_text.empty()
-            
+            # Process results (common for both paths)
             st.session_state.deadlines = deadlines
             # By default, exclude "general" category items from reminders
             selected_indices = set()
@@ -444,6 +621,11 @@ def main():
                     selected_indices.add(idx)
             st.session_state.selected = selected_indices
             st.session_state.scan_stats = stats
+            # Store last scan timestamp and email address
+            st.session_state.last_scan_time = datetime.now()
+            st.session_state.last_scan_email = cfg.email_address
+            # Clear fetched emails after successful processing
+            st.session_state.fetched_emails = None
             
             if len(deadlines) == 0:
                 st.warning(f"⚠️ Found 0 deadlines after scanning {stats.emails_fetched} emails")
@@ -504,6 +686,8 @@ def main():
                 st.error(f"Error during scan: {error_msg}")
                 with st.expander("Technical details"):
                     st.exception(e)
+        finally:
+            st.session_state.scan_in_progress = False
     
     # Initialize scan trigger state
     if "trigger_scan" not in st.session_state:
@@ -549,7 +733,7 @@ def main():
                         st.session_state.trigger_scan = True
                         st.session_state.skip_llm_for_scan = True
                         st.rerun()
-        elif st.button("Authenticate & Scan", type="primary"):
+        elif st.button("Authenticate & Scan", type="primary", help="Connect to your email and scan for deadlines. This may take a few moments depending on the number of emails."):
             # If LLM is enabled, first fetch emails to show cost
             if cfg.use_llm_extraction and not st.session_state.skip_scan_confirmation:
                 try:
@@ -569,8 +753,34 @@ def main():
         if skip_llm:
             st.session_state.skip_llm_for_scan = False
         perform_scan(cfg, skip_llm=skip_llm)
+    
+    # Display last scan timestamp if available
+    if "last_scan_time" in st.session_state and st.session_state.last_scan_time:
+        last_scan = st.session_state.last_scan_time
+        time_ago = datetime.now() - last_scan
+        if time_ago.total_seconds() < 60:
+            time_str = f"{int(time_ago.total_seconds())} seconds ago"
+        elif time_ago.total_seconds() < 3600:
+            time_str = f"{int(time_ago.total_seconds() / 60)} minutes ago"
+        else:
+            time_str = f"{int(time_ago.total_seconds() / 3600)} hours ago"
+        
+        # Include email address if available
+        email_info = ""
+        if "last_scan_email" in st.session_state and st.session_state.last_scan_email:
+            email_info = f" ({st.session_state.last_scan_email})"
+        
+        st.caption(f"🕐 Last scanned: {last_scan.strftime('%Y-%m-%d %H:%M:%S')} ({time_str}){email_info}")
+    
+    # Show "Continue Analysis" button if emails are fetched but scan was interrupted
+    if st.session_state.fetched_emails and not st.session_state.scan_in_progress and not st.session_state.deadlines:
+        st.info(f"📧 **{len(st.session_state.fetched_emails)} emails are ready for analysis.** Click below to continue processing them.")
+        if st.button("▶️ Continue Analysis", type="primary", help="Process the already-fetched emails to find deadlines"):
+            skip_llm = getattr(st.session_state, 'skip_llm_for_scan', False)
+            perform_scan(cfg, skip_llm=skip_llm, use_fetched_emails=True)
+    
     with col2:
-        if st.button("Clear Results"):
+        if st.button("Clear Results", help="Clear all scanned deadlines and reset the view"):
             st.session_state.deadlines = []
             st.session_state.selected = set()
             st.session_state.scan_stats = None
@@ -578,6 +788,11 @@ def main():
     deadlines = st.session_state.deadlines
     if deadlines:
         st.subheader("Review detected deadlines")
+        
+        # Show global selection count
+        total_deadlines = len(deadlines)
+        selected_count = len(st.session_state.selected)
+        st.caption(f"Selected: {selected_count} of {total_deadlines} deadlines")
         
         # Category color mapping
         category_colors = {
@@ -608,26 +823,24 @@ def main():
         if cfg.debug:
             st.caption(f"📊 Categories found: {sorted_categories} | Total deadlines: {len(deadlines)}")
         
-        def render_deadline_item(item, actual_idx):
+        def render_deadline_item(item, actual_idx, show_checkbox=False):
             """Render a single deadline item"""
             item_category = getattr(item, 'category', 'general')
-            is_selected = actual_idx in st.session_state.selected
-            # Make "Include" checkbox more prominent
-            col_include, col_info = st.columns([1, 4])
-            with col_include:
+            # Checkbox is now rendered outside this function, but we keep this for backward compatibility
+            if show_checkbox:
+                is_selected = actual_idx in st.session_state.selected
                 selected = st.checkbox(
                     "Include", 
                     value=is_selected, 
                     key=f"sel_{actual_idx}",
                     help="Check to include this deadline in calendar reminders"
                 )
-            with col_info:
+                if selected:
+                    st.session_state.selected.add(actual_idx)
+                else:
+                    st.session_state.selected.discard(actual_idx)
                 if item_category == "general":
                     st.caption("⚠️ General category - excluded by default")
-            if selected:
-                st.session_state.selected.add(actual_idx)
-            else:
-                st.session_state.selected.discard(actual_idx)
             col1, col2 = st.columns(2)
             with col1:
                 st.text(f"Category: **{item_category.title()}**")
@@ -692,33 +905,144 @@ def main():
                     if not category_deadlines:
                         st.info("No deadlines in this category")
                     else:
+                        # Per-category Select All / Deselect All toggle
+                        category_indices = [idx for idx, _ in category_deadlines]
+                        category_selected = [idx for idx in category_indices if idx in st.session_state.selected]
+                        category_selected_count = len(category_selected)
+                        all_category_selected = category_selected_count == len(category_indices)
+                        
+                        col_select_all, col_info = st.columns([1, 4])
+                        with col_select_all:
+                            if all_category_selected:
+                                if st.button("Deselect All", key=f"deselect_all_{category}_btn", help=f"Uncheck all {category} deadlines"):
+                                    for idx in category_indices:
+                                        st.session_state.selected.discard(idx)
+                                    st.rerun()
+                            else:
+                                if st.button("Select All", key=f"select_all_{category}_btn", help=f"Check all {category} deadlines"):
+                                    for idx in category_indices:
+                                        st.session_state.selected.add(idx)
+                                    st.rerun()
+                        with col_info:
+                            st.caption(f"Selected: {category_selected_count} of {len(category_indices)} in this category")
+                        
                         for actual_idx, item in category_deadlines:
                             item_category = getattr(item, 'category', 'general')
                             category_emoji = category_colors.get(item_category, "⚪")
-                            with st.expander(f"{item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
-                                render_deadline_item(item, actual_idx)
+                            
+                            # Check selection state first
+                            is_selected = actual_idx in st.session_state.selected
+                            
+                            # Render checkbox outside the expander for easy access
+                            col_checkbox, col_expander = st.columns([1, 20])
+                            with col_checkbox:
+                                selected = st.checkbox(
+                                    "",
+                                    value=is_selected,
+                                    key=f"sel_{actual_idx}",
+                                    help="Include this deadline in calendar reminders",
+                                    label_visibility="collapsed"
+                                )
+                                if selected:
+                                    st.session_state.selected.add(actual_idx)
+                                else:
+                                    st.session_state.selected.discard(actual_idx)
+                            
+                            with col_expander:
+                                # Show checkbox status in expander label
+                                checkbox_indicator = "☑️" if (actual_idx in st.session_state.selected) else "☐"
+                                with st.expander(f"{checkbox_indicator} {item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
+                                    render_deadline_item(item, actual_idx)
         else:
             # Fallback: no categories found (shouldn't happen, but handle gracefully)
             st.warning("No categories found in deadlines")
             for idx, item in enumerate(deadlines):
                 category_emoji = "⚪"
-                with st.expander(f"{item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
-                    render_deadline_item(item, idx)
+                
+                # Check selection state first
+                is_selected = idx in st.session_state.selected
+                
+                # Render checkbox outside the expander for easy access
+                col_checkbox, col_expander = st.columns([1, 20])
+                with col_checkbox:
+                    selected = st.checkbox(
+                        "",
+                        value=is_selected,
+                        key=f"sel_{idx}",
+                        help="Include this deadline in calendar reminders",
+                        label_visibility="collapsed"
+                    )
+                    if selected:
+                        st.session_state.selected.add(idx)
+                    else:
+                        st.session_state.selected.discard(idx)
+                
+                with col_expander:
+                    # Show checkbox status in expander label
+                    checkbox_indicator = "☑️" if (idx in st.session_state.selected) else "☐"
+                    with st.expander(f"{checkbox_indicator} {item.deadline_at.strftime('%Y-%m-%d %H:%M')} · {category_emoji} {item.title}"):
+                        render_deadline_item(item, idx)
 
         st.divider()
         st.subheader("Create calendar reminders for selected")
-        remind_minutes_before = st.number_input("Reminder: minutes before", min_value=0, max_value=1440, value=60)
-        if st.button("Create Reminders"):
+        remind_minutes_before = st.number_input(
+            "Reminder: minutes before", 
+            min_value=0, 
+            max_value=1440, 
+            value=60,
+            help="Set how many minutes before the deadline you want to be reminded. Default is 60 minutes (1 hour)."
+        )
+        if st.button("Create Reminders", help="Generate a .ics calendar file with reminders for all selected deadlines. You can import this file into Google Calendar, Outlook, Apple Calendar, etc."):
             svc = CalendarService()
             selected_requests: List[CalendarEventRequest] = []
             for idx in sorted(st.session_state.selected):
                 item = deadlines[idx]
+                
+                # Build a comprehensive description with all available information
+                # Note: Emojis will be removed by calendar.py for .ics compatibility
+                description_parts = []
+                
+                # Category and confidence
+                description_parts.append(f"Category: {item.category.title()}")
+                description_parts.append(f"Confidence: {item.confidence:.0%}")
+                
+                # Source information
+                description_parts.append(f"Source: {item.source}")
+                
+                # Email date if available
+                if item.email_date:
+                    description_parts.append(f"Email received: {item.email_date.strftime('%Y-%m-%d %H:%M')}")
+                
+                # LLM summary (most useful, if available)
+                if item.email_summary:
+                    description_parts.append(f"Summary: {item.email_summary}")
+                
+                # Email excerpt (if no summary available)
+                elif item.email_excerpt:
+                    excerpt = item.email_excerpt[:300].replace('\n', ' ').strip()  # Limit and clean
+                    description_parts.append(f"Email excerpt: {excerpt}")
+                
+                # Context (fallback)
+                elif item.context:
+                    context = item.context[:300].replace('\n', ' ').strip()  # Limit and clean
+                    description_parts.append(f"Context: {context}")
+                
+                # Link if available
+                if item.link:
+                    description_parts.append(f"Link: {item.link}")
+                
+                # Add footer
+                description_parts.append("Generated by Deadline Agent")
+                
+                # Join with newlines (will be escaped to \n in .ics format)
+                description = "\n".join(description_parts)
+                
                 selected_requests.append(
                     CalendarEventRequest(
                         title=item.title,
                         starts_at=item.deadline_at,
                         duration_minutes=30,
-                        description=item.context or f"Source: {item.source}",
+                        description=description,
                     )
                 )
             if selected_requests:
@@ -726,12 +1050,21 @@ def main():
                 st.session_state.generated_ics = ics
                 st.success(f"Prepared {len(selected_requests)} reminder(s). Download below.")
 
+        # Show download button - disabled until reminders are created
         if "generated_ics" in st.session_state and st.session_state.generated_ics:
             st.download_button(
                 label="Download .ics",
                 data=st.session_state.generated_ics.encode("utf-8"),
                 file_name="deadlines.ics",
                 mime="text/calendar",
+                help="Download the calendar file and import it into your calendar app (Google Calendar, Outlook, Apple Calendar, etc.)"
+            )
+        else:
+            # Show disabled button when no .ics file is ready
+            st.button(
+                label="Download .ics",
+                disabled=True,
+                help="Click 'Create Reminders' above to generate the calendar file first"
             )
 
     # Page footer
@@ -743,7 +1076,7 @@ def main():
         st.markdown(
             f"<div style='text-align: center; color: #666; font-size: 0.85em; padding: 10px 0;'>"
             f"Deadline Agent v{VERSION} | "
-            f"<a href='mailto:smartretireai@gmail.com' style='color: #666; text-decoration: none;'>About Us</a>"
+            f"About Us: <a href='mailto:smartretireai@gmail.com' style='color: #666; text-decoration: none;'>smartretireai@gmail.com</a>"
             f"</div>",
             unsafe_allow_html=True
         )
